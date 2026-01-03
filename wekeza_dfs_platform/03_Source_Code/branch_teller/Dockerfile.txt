@@ -1,0 +1,17 @@
+# Use lightweight Python
+FROM python:3.9-slim
+
+# Set working directory inside the container
+WORKDIR /app
+
+# Install dependencies (Streamlit for UI, Requests for API calls)
+RUN pip install streamlit requests pandas
+
+# Copy the app code into the container
+COPY . .
+
+# Expose the port (We use 8503 for Tellers)
+EXPOSE 8503
+
+# Run the app
+CMD ["streamlit", "run", "branch_teller.py", "--server.port=8503", "--server.address=0.0.0.0"]
