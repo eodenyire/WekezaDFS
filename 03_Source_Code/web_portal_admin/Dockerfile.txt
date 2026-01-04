@@ -1,0 +1,12 @@
+FROM python:3.9-slim
+
+WORKDIR /app
+
+# Install Streamlit and DB drivers
+RUN pip install streamlit pandas plotly sqlalchemy mysql-connector-python
+
+COPY . .
+
+EXPOSE 8501
+
+CMD ["streamlit", "run", "admin_dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"]

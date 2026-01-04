@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  # 1. The Database
+  db:
+    image: mysql:8.0
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: wekeza_dfs_db
+    ports:
+      - "3306:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+    networks:
+      - wekeza_net
+    healthcheck:
+      test: ["CMD", "mysqladmin" ,"ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
+  # 2. The Core Engine (API)
+  backend:
+    build: ./03_Source_Code/backend_api
+    restart: always
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - DB_HOST=db
+      - DB_PASSWORD=root
+    networks:
+      - wekeza_net
+
+  # 3. The Admin Dashboard (Risk Manager)
+  admin_portal:
+    build: ./03_Source_Code/web_portal_admin
+    ports:
+      - "8501:8501"
+    depends_on:
+      - backend
+    environment:
+      - API_URL=http://backend:8000
+      - DB_HOST=db
+    networks:
+      - wekeza_net
+
+  # 4. The Customer Portal (Juma)
+  customer_portal:
+    build: ./03_Source_Code/web_portal_customer
+    ports:
+      - "8502:8502"
+    depends_on:
+      - backend
+    environment:
+      - API_URL=http://backend:8000
+    networks:
+      - wekeza_net
+
+volumes:
+  db_data:
+
+networks:
+  wekeza_net:
+    driver: bridge
