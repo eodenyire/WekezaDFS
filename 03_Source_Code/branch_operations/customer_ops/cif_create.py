@@ -3,6 +3,12 @@ from datetime import datetime
 from .services.api_client import post_request
 from .services.permissions import can_perform_action
 from .common import validate_customer_id, validate_amount, show_receipt
+import sys
+import os
+
+# Add shared modules to path
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'shared'))
+from authorization_helper import submit_to_authorization_queue, check_authorization_thresholds
 
 # -----------------------------------------------------------------------------
 # Render CIF Creation UI
@@ -10,6 +16,7 @@ from .common import validate_customer_id, validate_amount, show_receipt
 def render_cif_ui(officer: dict):
     """
     Streamlit UI for creating a Customer Information File (CIF)
+    All CIF creations require supervisor approval (maker-checker)
     """
     st.subheader("🆔 CIF Creation (KYC Onboarding)")
 
@@ -30,7 +37,8 @@ def render_cif_ui(officer: dict):
         address = st.text_area("Residential Address")
         nationality = st.selectbox("Nationality", ["Kenyan", "Other"])
         id_type = st.selectbox("ID Type", ["National ID", "Passport", "Other"])
-        submit_btn = st.form_submit_button("Create CIF")
+        customer_type = st.selectbox("Customer Type", ["Individual", "Business"])
+        submit_btn = st.form_submit_button("Submit CIF for Approval")
 
     # -----------------------------
     # Handle Form Submission
@@ -50,10 +58,8 @@ def render_cif_ui(officer: dict):
             st.error("Residential Address is required")
             return
 
-        # Prepare payload
-        payload = {
-            "officer_id": officer["officer_id"],
-            "branch_code": officer["branch_code"],
+        # Prepare operation data
+        operation_data = {
             "customer_id": customer_id,
             "full_name": full_name.strip(),
             "dob": dob.strftime("%Y-%m-%d"),
@@ -62,12 +68,64 @@ def render_cif_ui(officer: dict):
             "address": address.strip(),
             "nationality": nationality,
             "id_type": id_type,
+            "customer_type": customer_type.lower(),
+            "officer_id": officer["officer_id"],
+            "branch_code": officer["branch_code"],
             "created_at": datetime.now().isoformat()
         }
 
         # -----------------------------
-        # Call Backend API
+        # Submit to Authorization Queue
         # -----------------------------
+        with st.spinner("Submitting CIF for approval..."):
+            try:
+                result = submit_to_authorization_queue(
+                    operation_type='CIF_CREATE',
+                    operation_data=operation_data,
+                    maker_info=officer,
+                    priority='HIGH'  # CIF creation always requires approval
+                )
+                
+                if result['success']:
+                    st.success("✅ CIF creation submitted for supervisor approval!")
+                    
+                    # Display authorization receipt
+                    st.markdown("### 🧾 CIF Authorization Receipt")
+                    st.code(f"""
+WEKEZA BANK - CIF CREATION AUTHORIZATION
+Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Queue ID: {result['queue_id']}
+Officer: {officer['full_name']} ({officer['officer_id']})
+Branch: {officer['branch_code']}
+
+Customer Details:
+National ID: {customer_id}
+Full Name: {full_name}
+Phone: {phone}
+Email: {email}
+Customer Type: {customer_type}
+
+Status: {result['status']}
+Priority: HIGH (Always requires supervisor approval)
+
+IMPORTANT: CIF creation requires supervisor approval for compliance.
+                    """)
+                    
+                    # Show next steps
+                    st.markdown("### 📋 Next Steps")
+                    st.info("1. CIF is queued for supervisor approval")
+                    st.info("2. Supervisor will review customer details and KYC documents")
+                    st.info("3. Upon approval, CIF number will be generated")
+                    st.info("4. Customer can then proceed with account opening")
+                    
+                    st.warning("⚠️ **Compliance Note:** All CIF creations require supervisor approval to ensure proper KYC compliance and risk management.")
+                        
+                else:
+                    st.error(f"❌ CIF submission failed: {result['error']}")
+                    
+            except Exception as e:
+                st.error(f"System error: {e}")
+                return
         with st.spinner("Submitting CIF..."):
             try:
                 response = post_request("/customer/cif", payload)

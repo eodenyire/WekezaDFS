@@ -66,105 +66,161 @@ def render_supervision_ui(staff_info):
 
     # TAB 1: Authorization Queue
     with tab_queue:
-        st.subheader("📝 Transactions Pending Authorization")
+        st.subheader("📝 Items Pending Authorization")
+        
+        # Filter options
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            filter_type = st.selectbox("Filter by Type", [
+                "All", "LOAN_APPLICATION", "BANK_TRANSFER", "MOBILE_MONEY_TRANSFER", "BILL_PAYMENT", "CDSC_TRANSFER",
+                "CASH_DEPOSIT", "CASH_WITHDRAWAL", "CHEQUE_DEPOSIT", 
+                "CIF_CREATE", "ACCOUNT_OPENING", "ACCOUNT_MAINTENANCE", "ACCOUNT_CLOSURE", 
+                "MANDATE_MANAGEMENT", "POLICY_SALE", "CLAIMS_PROCESSING", "PREMIUM_COLLECTION",
+                "TELLER_CASH_ISSUE", "TELLER_CASH_RECEIVE", "VAULT_OPENING", "VAULT_CLOSING",
+                "ATM_CASH_LOADING", "ATM_CASH_OFFLOADING"
+            ])
+        with col2:
+            filter_priority = st.selectbox("Filter by Priority", ["All", "URGENT", "HIGH", "MEDIUM", "LOW"])
+        with col3:
+            if st.button("🔄 Refresh Queue"):
+                st.rerun()
         
         try:
             conn = get_db_connection()
             if conn:
                 cursor = conn.cursor(dictionary=True)
                 
-                # Get recent high-value transactions that might need approval (only pending ones)
-                cursor.execute("""
-                    SELECT t.*, a.account_number, u.full_name
-                    FROM transactions t
-                    JOIN accounts a ON t.account_id = a.account_id
-                    JOIN users u ON a.user_id = u.user_id
-                    WHERE t.amount > 50000 
-                    AND DATE(t.created_at) = CURDATE()
-                    AND (t.status IS NULL OR t.status = 'PENDING' OR t.status = 'COMPLETED')
-                    AND (t.approved_by IS NULL OR t.approved_by = '')
-                    ORDER BY t.created_at DESC
-                    LIMIT 20
+                # Build filter conditions
+                type_condition = "" if filter_type == "All" else f"AND aq.transaction_type = '{filter_type}'"
+                priority_condition = "" if filter_priority == "All" else f"AND aq.priority = '{filter_priority}'"
+                
+                # Get items from authorization queue with detailed information
+                cursor.execute(f"""
+                    SELECT aq.*, 
+                           la.loan_type, la.purpose, la.interest_rate, la.tenure_months,
+                           la.account_number, u.full_name as customer_name,
+                           CASE 
+                               WHEN aq.transaction_type = 'LOAN_APPLICATION' THEN CONCAT('Loan Application - ', la.loan_type)
+                               WHEN aq.transaction_type = 'BANK_TRANSFER' THEN CONCAT('Bank Transfer - ', SUBSTRING(aq.description, LOCATE('from ', aq.description) + 5, 15))
+                               WHEN aq.transaction_type = 'MOBILE_MONEY_TRANSFER' THEN CONCAT('Mobile Money Transfer - ', SUBSTRING(aq.description, LOCATE('to ', aq.description) + 3, 15))
+                               WHEN aq.transaction_type = 'BILL_PAYMENT' THEN CONCAT('Bill Payment - ', SUBSTRING(aq.description, LOCATE('to ', aq.description) + 3, 20))
+                               WHEN aq.transaction_type = 'CDSC_TRANSFER' THEN CONCAT('CDSC Transfer - ', SUBSTRING(aq.description, LOCATE('to ', aq.description) + 3, 15))
+                               WHEN aq.transaction_type = 'CASH_DEPOSIT' THEN CONCAT('Cash Deposit - Account ', SUBSTRING(aq.description, LOCATE('account ', aq.description) + 8, 10))
+                               WHEN aq.transaction_type = 'CASH_WITHDRAWAL' THEN CONCAT('Cash Withdrawal - Account ', SUBSTRING(aq.description, LOCATE('account ', aq.description) + 8, 10))
+                               WHEN aq.transaction_type = 'CHEQUE_DEPOSIT' THEN CONCAT('Cheque Deposit - Account ', SUBSTRING(aq.description, LOCATE('account ', aq.description) + 8, 10))
+                               WHEN aq.transaction_type = 'CIF_CREATE' THEN CONCAT('CIF Creation - ', SUBSTRING(aq.description, LOCATE('for ', aq.description) + 4))
+                               WHEN aq.transaction_type = 'ACCOUNT_OPENING' THEN CONCAT('Account Opening - ', SUBSTRING(aq.description, LOCATE('for ', aq.description) + 4))
+                               WHEN aq.transaction_type = 'ACCOUNT_CLOSURE' THEN CONCAT('Account Closure - ', SUBSTRING(aq.description, LOCATE('for ', aq.description) + 4))
+                               WHEN aq.transaction_type = 'POLICY_SALE' THEN CONCAT('Insurance Policy Sale - ', SUBSTRING(aq.description, LOCATE('- ', aq.description) + 2))
+                               WHEN aq.transaction_type = 'CLAIMS_PROCESSING' THEN CONCAT('Insurance Claim - ', SUBSTRING(aq.description, LOCATE('- ', aq.description) + 2))
+                               WHEN aq.transaction_type = 'PREMIUM_COLLECTION' THEN CONCAT('Premium Payment - ', SUBSTRING(aq.description, LOCATE('for ', aq.description) + 4))
+                               ELSE aq.description
+                           END as display_description
+                    FROM authorization_queue aq
+                    LEFT JOIN loan_applications la ON aq.reference_id = la.application_id AND aq.transaction_type = 'LOAN_APPLICATION'
+                    LEFT JOIN accounts a ON la.account_number = a.account_number
+                    LEFT JOIN users u ON a.user_id = u.user_id
+                    WHERE aq.status = 'PENDING'
+                    {type_condition}
+                    {priority_condition}
+                    ORDER BY 
+                        CASE aq.priority 
+                            WHEN 'URGENT' THEN 1 
+                            WHEN 'HIGH' THEN 2 
+                            WHEN 'MEDIUM' THEN 3 
+                            WHEN 'LOW' THEN 4 
+                        END,
+                        aq.created_at ASC
+                    LIMIT 50
                 """)
                 
-                transactions = cursor.fetchall()
-                conn.close()
+                queue_items = cursor.fetchall()
                 
-                if transactions:
-                    for txn in transactions:
-                        with st.expander(f"Transaction {txn['reference_code']} - KES {txn['amount']:,.2f}"):
+                if queue_items:
+                    st.info(f"📋 {len(queue_items)} items pending your authorization")
+                    
+                    for item in queue_items:
+                        # Priority color coding
+                        priority_colors = {
+                            'URGENT': '🔴',
+                            'HIGH': '🟠', 
+                            'MEDIUM': '🟡',
+                            'LOW': '🟢'
+                        }
+                        priority_icon = priority_colors.get(item['priority'], '⚪')
+                        
+                        with st.expander(f"{priority_icon} {item['transaction_type']} - {item['reference_id']} - KES {item['amount']:,.2f}"):
                             col1, col2, col3 = st.columns(3)
                             
                             with col1:
-                                st.write(f"**Account:** {txn['account_number']}")
-                                st.write(f"**Customer:** {txn['full_name']}")
-                                st.write(f"**Type:** {txn['txn_type']}")
+                                st.write("**Transaction Details**")
+                                st.write(f"**Type:** {item['transaction_type']}")
+                                st.write(f"**Reference:** {item['reference_id']}")
+                                st.write(f"**Amount:** KES {item['amount']:,.2f}")
+                                st.write(f"**Priority:** {item['priority']}")
+                                
+                                if item['transaction_type'] == 'LOAN':
+                                    st.write(f"**Account:** {item['account_number']}")
+                                    st.write(f"**Customer:** {item['customer_name']}")
                                 
                             with col2:
-                                st.write(f"**Amount:** KES {txn['amount']:,.2f}")
-                                st.write(f"**Date:** {txn['created_at']}")
-                                st.write(f"**Reference:** {txn['reference_code']}")
+                                st.write("**Maker Information**")
+                                st.write(f"**Maker ID:** {item['maker_id']}")
+                                st.write(f"**Maker Name:** {item['maker_name']}")
+                                st.write(f"**Created:** {item['created_at']}")
+                                st.write(f"**Branch:** {item['branch_code']}")
+                                
+                                if item['transaction_type'] == 'LOAN':
+                                    st.write(f"**Loan Type:** {item['loan_type']}")
+                                    st.write(f"**Interest Rate:** {item['interest_rate']}%")
+                                    st.write(f"**Tenure:** {item['tenure_months']} months")
                                 
                             with col3:
+                                st.write("**Authorization Actions**")
+                                
+                                if item['transaction_type'] == 'LOAN':
+                                    st.write(f"**Purpose:** {item['purpose']}")
+                                
+                                st.write(f"**Description:** {item['display_description']}")
+                                
+                                # Approval buttons
                                 col3a, col3b = st.columns(2)
                                 with col3a:
-                                    if st.button(f"✅ Approve", key=f"approve_{txn['transaction_id']}"):
-                                        try:
-                                            # Update transaction status to approved
-                                            conn_update = get_db_connection()
-                                            if conn_update:
-                                                cursor_update = conn_update.cursor()
-                                                cursor_update.execute("""
-                                                    UPDATE transactions 
-                                                    SET status = 'APPROVED', 
-                                                        approved_by = %s, 
-                                                        approved_at = NOW(),
-                                                        remarks = CONCAT(COALESCE(remarks, ''), ' - Approved by supervisor')
-                                                    WHERE transaction_id = %s
-                                                """, (staff['staff_code'], txn['transaction_id']))
-                                                conn_update.commit()
-                                                conn_update.close()
-                                                
-                                                st.success(f"✅ Transaction {txn['reference_code']} approved successfully!")
-                                                st.write(f"**Approved by:** {staff['full_name']}")
-                                                st.write(f"**Timestamp:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                                                
-                                                # Refresh the page to update the queue
-                                                st.rerun()
-                                        except Exception as e:
-                                            st.error(f"Error approving transaction: {e}")
+                                    if st.button(f"✅ Approve", key=f"approve_{item['queue_id']}", type="primary"):
+                                        approve_queue_item(item, staff, conn)
                                 
                                 with col3b:
-                                    if st.button(f"❌ Reject", key=f"reject_{txn['transaction_id']}"):
-                                        try:
-                                            # Update transaction status to rejected
-                                            conn_update = get_db_connection()
-                                            if conn_update:
-                                                cursor_update = conn_update.cursor()
-                                                cursor_update.execute("""
-                                                    UPDATE transactions 
-                                                    SET status = 'REJECTED', 
-                                                        approved_by = %s, 
-                                                        approved_at = NOW(),
-                                                        remarks = CONCAT(COALESCE(remarks, ''), ' - Rejected by supervisor')
-                                                    WHERE transaction_id = %s
-                                                """, (staff['staff_code'], txn['transaction_id']))
-                                                conn_update.commit()
-                                                conn_update.close()
-                                                
-                                                st.error(f"❌ Transaction {txn['reference_code']} rejected!")
-                                                st.write(f"**Rejected by:** {staff['full_name']}")
-                                                st.write(f"**Timestamp:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                                                
-                                                # Refresh the page to update the queue
+                                    if st.button(f"❌ Reject", key=f"reject_{item['queue_id']}", type="secondary"):
+                                        st.session_state[f'show_reject_form_{item["queue_id"]}'] = True
+                                
+                                # Rejection reason form
+                                if st.session_state.get(f'show_reject_form_{item["queue_id"]}', False):
+                                    with st.form(f"reject_form_{item['queue_id']}"):
+                                        rejection_reason = st.text_area("Rejection Reason", placeholder="Please provide reason for rejection...")
+                                        
+                                        col_submit, col_cancel = st.columns(2)
+                                        with col_submit:
+                                            if st.form_submit_button("❌ Confirm Rejection"):
+                                                if rejection_reason.strip():
+                                                    reject_queue_item(item, staff, rejection_reason, conn)
+                                                    st.session_state[f'show_reject_form_{item["queue_id"]}'] = False
+                                                    st.rerun()
+                                                else:
+                                                    st.error("Please provide a rejection reason")
+                                        
+                                        with col_cancel:
+                                            if st.form_submit_button("Cancel"):
+                                                st.session_state[f'show_reject_form_{item["queue_id"]}'] = False
                                                 st.rerun()
-                                        except Exception as e:
-                                            st.error(f"Error rejecting transaction: {e}")
                 else:
-                    st.info("No transactions pending authorization")
-                    
+                    st.success("✅ No items pending authorization")
+                    st.info("All transactions have been processed or no high-value transactions today.")
+                
+                conn.close()
+                
         except Exception as e:
             st.error(f"Error loading authorization queue: {e}")
+            st.write("Please check database connection and try again.")
 
     # TAB 2: Transaction Approvals
     with tab_approvals:
@@ -204,12 +260,10 @@ def render_supervision_ui(staff_info):
                                     status = action.upper()
                                     cursor_update.execute("""
                                         UPDATE transactions 
-                                        SET status = %s, 
-                                            approved_by = %s, 
-                                            approved_at = NOW(),
-                                            remarks = %s
+                                        SET status = %s,
+                                            description = CONCAT(COALESCE(description, ''), ' - ', %s, ' by supervisor')
                                         WHERE transaction_id = %s
-                                    """, (status, staff['staff_code'], remarks or f"{action} by supervisor", transaction['transaction_id']))
+                                    """, (status, action, transaction['transaction_id']))
                                     conn_update.commit()
                                     conn_update.close()
                                     
@@ -440,6 +494,93 @@ Summary:
                     file_name=f"{report_type.lower().replace(' ', '_')}_{report_date}.txt",
                     mime="text/plain"
                 )
+
+
+def approve_queue_item(item, staff, conn):
+    """Approve an item in the authorization queue"""
+    try:
+        cursor = conn.cursor()
+        
+        # Update authorization queue status
+        cursor.execute("""
+            UPDATE authorization_queue 
+            SET status = 'APPROVED', approved_by = %s, approved_at = %s
+            WHERE queue_id = %s
+        """, (staff['staff_code'], datetime.now(), item['queue_id']))
+        
+        # Use authorization helper to execute the approved operation
+        try:
+            # Import authorization helper
+            import sys
+            import os
+            sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'shared'))
+            from authorization_helper import execute_approved_operation
+            
+            # Execute the approved operation
+            execution_result = execute_approved_operation(item)
+            
+        except Exception as e:
+            execution_result = {"success": False, "error": f"Failed to execute operation: {e}"}
+        
+        conn.commit()
+        
+        st.success(f"✅ {item['transaction_type'].replace('_', ' ').title()} approved and executed successfully!")
+        st.write(f"**Approved by:** {staff['full_name']}")
+        st.write(f"**Timestamp:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        # Show execution details
+        if execution_result.get('success'):
+            st.info(f"💰 {execution_result['message']}")
+        else:
+            st.warning(f"⚠️ Approval recorded but execution failed: {execution_result.get('error', 'Unknown error')}")
+        
+        # Show operation-specific details
+        if item['transaction_type'] == 'LOAN_APPLICATION':
+            st.info(f"💰 Loan of KES {item['amount']:,.2f} approved for customer {item.get('customer_name', 'N/A')}")
+        elif item['transaction_type'] in ['CASH_DEPOSIT', 'CASH_WITHDRAWAL', 'CHEQUE_DEPOSIT']:
+            st.info(f"💰 {item['transaction_type'].replace('_', ' ').title()} of KES {item['amount']:,.2f} processed")
+        elif item['transaction_type'] == 'CIF_CREATE':
+            st.info(f"👤 Customer Information File created and activated")
+        elif item['transaction_type'] == 'ACCOUNT_OPENING':
+            st.info(f"🏦 New account opened and activated")
+        
+        st.rerun()
+        
+    except Exception as e:
+        st.error(f"Error approving item: {e}")
+
+
+def reject_queue_item(item, staff, rejection_reason, conn):
+    """Reject an item in the authorization queue"""
+    try:
+        cursor = conn.cursor()
+        
+        # Update authorization queue status
+        cursor.execute("""
+            UPDATE authorization_queue 
+            SET status = 'REJECTED', approved_by = %s, approved_at = %s, rejection_reason = %s
+            WHERE queue_id = %s
+        """, (staff['staff_code'], datetime.now(), rejection_reason, item['queue_id']))
+        
+        # If it's a loan application, update the loan status
+        if item['transaction_type'] == 'LOAN_APPLICATION':
+            cursor.execute("""
+                UPDATE loan_applications 
+                SET status = 'REJECTED', approved_by = %s, approved_at = %s
+                WHERE application_id = %s
+            """, (staff['staff_code'], datetime.now(), item['reference_id']))
+        
+        conn.commit()
+        
+        st.error(f"❌ {item['transaction_type']} {item['reference_id']} rejected")
+        st.write(f"**Rejected by:** {staff['full_name']}")
+        st.write(f"**Reason:** {rejection_reason}")
+        st.write(f"**Timestamp:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        st.rerun()
+        
+    except Exception as e:
+        st.error(f"Error rejecting item: {e}")
 
 
 # Legacy function for standalone usage
