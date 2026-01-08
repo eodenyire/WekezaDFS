@@ -443,8 +443,15 @@ def main_dashboard():
                     st.metric("Daily Payment", f"KES {daily_payment:,.2f}")
 
 def make_loan_payment(user_id, loan_id, payment_amount, account_number):
-    """Process loan repayment"""
+    """Process loan repayment through authorization queue (maker-checker system)"""
     try:
+        # Import authorization helper
+        import sys
+        import os
+        sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'branch_operations', 'shared'))
+        from authorization_helper import submit_to_authorization_queue
+        
+        # Check account balance first
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
         
@@ -453,60 +460,94 @@ def make_loan_payment(user_id, loan_id, payment_amount, account_number):
         loan = cursor.fetchone()
         
         if not loan:
-            st.error("Loan not found!")
+            st.error("❌ Loan not found!")
             return
         
         # Get account details
         cursor.execute("SELECT * FROM accounts WHERE user_id = %s", (user_id,))
         account = cursor.fetchone()
-        
-        if not account or account['balance'] < payment_amount:
-            st.error(f"Insufficient balance! Available: KES {account['balance']:,.2f}")
-            return
-        
-        # Update account balance
-        new_balance = float(account['balance']) - payment_amount
-        cursor.execute("UPDATE accounts SET balance = %s WHERE account_id = %s", 
-                      (new_balance, account['account_id']))
-        
-        # Update loan balance
-        new_loan_balance = float(loan['balance_remaining']) - payment_amount
-        loan_status = 'PAID' if new_loan_balance <= 0 else 'ACTIVE'
-        
-        cursor.execute("""
-            UPDATE loans SET balance_remaining = %s, status = %s, updated_at = %s 
-            WHERE loan_id = %s
-        """, (max(0, new_loan_balance), loan_status, datetime.now(), loan_id))
-        
-        # Record transaction
-        import uuid
-        ref_code = f"LRP{uuid.uuid4().hex[:8].upper()}"
-        cursor.execute("""
-            INSERT INTO transactions (account_id, txn_type, amount, reference_code, description, created_at)
-            VALUES (%s, 'LOAN_REPAYMENT', %s, %s, %s, %s)
-        """, (account['account_id'], payment_amount, ref_code, 
-              f"Loan repayment for Loan #{loan_id}", datetime.now()))
-        
-        conn.commit()
         conn.close()
         
-        if new_loan_balance <= 0:
-            st.success(f"🎉 Loan fully paid! Overpayment of KES {abs(new_loan_balance):,.2f} credited to your account.")
-            # Credit overpayment back to account
-            if new_loan_balance < 0:
-                conn = get_db_connection()
-                cursor = conn.cursor()
-                cursor.execute("UPDATE accounts SET balance = balance + %s WHERE account_id = %s", 
-                              (abs(new_loan_balance), account['account_id']))
-                conn.commit()
-                conn.close()
-        else:
-            st.success(f"✅ Payment successful! Remaining balance: KES {new_loan_balance:,.2f}")
+        if not account or account['balance'] < payment_amount:
+            st.error(f"❌ Insufficient balance! Available: KES {account['balance']:,.2f}")
+            return
         
-        st.rerun()
+        # Get user details for maker info
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT full_name FROM users WHERE user_id = %s", (user_id,))
+        user = cursor.fetchone()
+        conn.close()
+        
+        # Prepare operation data for authorization queue
+        operation_data = {
+            "user_id": user_id,
+            "account_number": account_number,
+            "loan_id": loan_id,
+            "loan_type": loan.get('loan_type', 'Personal Loan'),
+            "payment_amount": float(payment_amount),
+            "current_balance": float(loan['balance_remaining']),
+            "transaction_date": datetime.now().isoformat(),
+            "customer_name": user.get('full_name', 'Customer')
+        }
+        
+        # Prepare maker info
+        maker_info = {
+            "user_id": f"CUSTOMER_{user_id}",
+            "full_name": f"Customer Self-Service - {user.get('full_name', 'Customer')}",
+            "branch_code": "ONLINE"
+        }
+        
+        # Determine priority based on amount
+        priority = "URGENT" if payment_amount > 500000 else "HIGH" if payment_amount > 100000 else "MEDIUM"
+        
+        # Submit to authorization queue
+        result = submit_to_authorization_queue(
+            operation_type='LOAN_REPAYMENT',
+            operation_data=operation_data,
+            maker_info=maker_info,
+            priority=priority
+        )
+        
+        if result.get('success'):
+            st.success(f"✅ Loan payment submitted for supervisor approval!")
+            st.info(f"📋 Queue ID: {result['queue_id']}")
+            st.info(f"💰 Payment Amount: KES {payment_amount:,.2f}")
+            st.info(f"📋 Loan ID: {loan_id}")
+            st.warning("⚠️ **Important:** Your loan payment requires supervisor approval before processing.")
+            st.info("🔄 You will be notified once a supervisor reviews your payment")
+            st.info("⏱️ Typical approval time: 2-4 business hours during banking hours")
+            
+            # Display authorization receipt
+            st.markdown("### 🧾 Loan Payment Authorization Receipt")
+            st.code(f"""
+WEKEZA BANK - LOAN PAYMENT AUTHORIZATION
+Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Queue ID: {result['queue_id']}
+Customer: {user.get('full_name', 'Customer')}
+Account: {account_number}
+
+Payment Details:
+Loan ID: {loan_id}
+Payment Amount: KES {payment_amount:,.2f}
+Current Loan Balance: KES {loan['balance_remaining']:,.2f}
+
+Status: PENDING APPROVAL
+Priority: {priority}
+
+Next Steps:
+1. Supervisor will review and approve/reject
+2. Payment will be processed after approval
+3. Loan balance will be updated after approval
+            """)
+            st.balloons()
+        else:
+            st.error(f"❌ Payment submission failed: {result.get('error', 'Unknown error')}")
         
     except Exception as e:
-        st.error(f"❌ Payment failed: {e}")
+        st.error(f"❌ Payment processing failed: {e}")
+        import traceback
+        st.error(f"Error details: {traceback.format_exc()}")
 
     with tab2: # INSURE
         st.subheader("🛡️ Wekeza Salama Insurance")

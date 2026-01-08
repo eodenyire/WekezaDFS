@@ -1,0 +1,8 @@
+http://127.0.0.1:8000/docs#/ - APIs
+http://localhost:8501/ - Branch Operations New
+http://localhost:8502/n- Personal Banking - - The simple previous one
+http://localhost:8503/ - Admin Old - The simple previous one
+http://localhost:8504/ - Business Banking
+http://localhost:8505/ - Branch Teller - The old one, the simple one
+http://localhost:8507/ - Personal Banking New
+http://localhost:8508/ - Admin New

@@ -1,0 +1,12 @@
+FROM python:3.9-slim
+
+WORKDIR /app
+
+# Install Streamlit and Requests
+RUN pip install streamlit requests
+
+COPY . .
+
+EXPOSE 8502
+
+CMD ["streamlit", "run", "customer_app.py", "--server.port=8502", "--server.address=0.0.0.0"]
